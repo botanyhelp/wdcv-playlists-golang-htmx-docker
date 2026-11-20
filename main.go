@@ -56,40 +56,66 @@ func ExtractSpreadsheetID(rawURL string) string {
 	return ""
 }
 
-// DiscoverGIDs fetches the htmlview page of the Google Sheet and extracts all tab gids.
+// DiscoverGIDs fetches pubhtml and htmlview pages of the Google Sheet, extracts all tab gids, and honors SHEET_GIDS env var.
 func DiscoverGIDs(spreadsheetID string) []string {
-	htmlURL := fmt.Sprintf("https://docs.google.com/spreadsheets/d/%s/htmlview", spreadsheetID)
-	resp, err := http.Get(htmlURL)
-	if err != nil {
-		return []string{"0"}
+	urls := []string{
+		fmt.Sprintf("https://docs.google.com/spreadsheets/d/%s/pubhtml", spreadsheetID),
+		fmt.Sprintf("https://docs.google.com/spreadsheets/d/%s/htmlview", spreadsheetID),
 	}
-	defer resp.Body.Close()
-
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return []string{"0"}
-	}
-	htmlStr := string(bodyBytes)
-
-	// Find all gid=... occurrences
-	re := regexp.MustCompile(`gid=([0-9]+)`)
-	matches := re.FindAllStringSubmatch(htmlStr, -1)
 
 	seen := make(map[string]bool)
-	var gids []string
 	seen["0"] = true
+	var gids []string
 	gids = append(gids, "0")
 
-	for _, m := range matches {
-		if len(m) > 1 {
-			gid := m[1]
-			if !seen[gid] {
-				seen[gid] = true
-				gids = append(gids, gid)
+	for _, u := range urls {
+		resp, err := http.Get(u)
+		if err != nil {
+			continue
+		}
+		bodyBytes, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			continue
+		}
+		htmlStr := string(bodyBytes)
+
+		// Match gid=123456 or "gid":123456 or sheetId:123456
+		patterns := []string{
+			`gid=([0-9]+)`,
+			`"gid"\s*:\s*"?([0-9]+)"?`,
+			`sheetId["']?\s*:\s*"?([0-9]+)"?`,
+			`id=["']sheet-button-([0-9]+)["']`,
+			`data-sheet-id=["']?([0-9]+)["']?`,
+		}
+
+		for _, pat := range patterns {
+			re := regexp.MustCompile(pat)
+			matches := re.FindAllStringSubmatch(htmlStr, -1)
+			for _, m := range matches {
+				if len(m) > 1 {
+					gid := m[1]
+					if !seen[gid] {
+						seen[gid] = true
+						gids = append(gids, gid)
+					}
+				}
 			}
 		}
 	}
 
+	// Also check SHEET_GIDS environment variable override
+	if envGids := os.Getenv("SHEET_GIDS"); envGids != "" {
+		for _, g := range strings.Split(envGids, ",") {
+			g = strings.TrimSpace(g)
+			if g != "" && !seen[g] {
+				seen[g] = true
+				gids = append(gids, g)
+			}
+		}
+	}
+
+	log.Printf("Discovered total %d unique tab gid(s) for spreadsheet %s: %v", len(gids), spreadsheetID, gids)
 	return gids
 }
 
@@ -241,7 +267,7 @@ func (ds *DataStore) FetchRemote() error {
 	}
 
 	gids := DiscoverGIDs(spreadsheetID)
-	log.Printf("Discovered %d tab(s) for spreadsheet ID %s: %v", len(gids), spreadsheetID, gids)
+	log.Printf("Fetching %d tab(s) for spreadsheet ID %s: %v", len(gids), spreadsheetID, gids)
 
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -276,6 +302,7 @@ func (ds *DataStore) FetchRemote() error {
 			for s := range shows {
 				showSet[s] = struct{}{}
 			}
+			log.Printf("Successfully loaded %d tracks from gid %s", len(tracks), g)
 			mu.Unlock()
 		}(gid)
 	}
