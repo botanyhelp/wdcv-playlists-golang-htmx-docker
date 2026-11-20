@@ -1,0 +1,6 @@
+{
+  "name": "Radio Playlist Explorer (Go + htmx + GCP Cloud Run)",
+  "description": "Production-grade Radio Station Playlist Explorer with Google Docs/Sheets CSV sync, regex search, date filters, heavy rotation toggles, and Go/htmx/Docker deployment generator.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
