@@ -80,7 +80,6 @@ func DiscoverGIDs(spreadsheetID string) []string {
 		}
 		htmlStr := string(bodyBytes)
 
-		// Match gid=123456 or "gid":123456 or sheetId:123456
 		patterns := []string{
 			`gid=([0-9]+)`,
 			`"gid"\s*:\s*"?([0-9]+)"?`,
@@ -104,7 +103,6 @@ func DiscoverGIDs(spreadsheetID string) []string {
 		}
 	}
 
-	// Also check SHEET_GIDS environment variable override
 	if envGids := os.Getenv("SHEET_GIDS"); envGids != "" {
 		for _, g := range strings.Split(envGids, ",") {
 			g = strings.TrimSpace(g)
@@ -119,26 +117,76 @@ func DiscoverGIDs(spreadsheetID string) []string {
 	return gids
 }
 
+// normalizeShowKey creates a normalized key for grouping typo variants and casing differences.
+func normalizeShowKey(name string) string {
+	s := strings.ToLower(strings.TrimSpace(name))
+	s = strings.TrimPrefix(s, "the ")
+	re := regexp.MustCompile(`[^a-z0-9]`)
+	return re.ReplaceAllString(s, "")
+}
+
+// unifyShowNames groups similar show names (typos, casing, leading "The") and maps them to a single canonical display name.
+func unifyShowNames(tracks []Track) []Track {
+	rawCounts := make(map[string]int)
+	for _, tr := range tracks {
+		cleaned := strings.TrimSpace(tr.ShowName)
+		if cleaned != "" {
+			rawCounts[cleaned]++
+		}
+	}
+
+	keyToRaws := make(map[string][]string)
+	for raw := range rawCounts {
+		key := normalizeShowKey(raw)
+		keyToRaws[key] = append(keyToRaws[key], raw)
+	}
+
+	canonicalMap := make(map[string]string)
+	for _, raws := range keyToRaws {
+		bestRaw := raws[0]
+		maxCount := rawCounts[bestRaw]
+		for _, r := range raws {
+			if rawCounts[r] > maxCount {
+				bestRaw = r
+				maxCount = rawCounts[r]
+			} else if rawCounts[r] == maxCount {
+				if len(r) > len(bestRaw) {
+					bestRaw = r
+				}
+			}
+		}
+		for _, r := range raws {
+			canonicalMap[r] = bestRaw
+		}
+	}
+
+	for i := range tracks {
+		cleaned := strings.TrimSpace(tracks[i].ShowName)
+		if canonical, exists := canonicalMap[cleaned]; exists {
+			tracks[i].ShowName = canonical
+		}
+	}
+
+	return tracks
+}
+
 // parseCSVStream parses CSV rows from a reader into Tracks and a set of Shows.
 func parseCSVStream(r io.Reader) ([]Track, map[string]struct{}, error) {
 	reader := csv.NewReader(r)
 	reader.LazyQuotes = true
 	reader.FieldsPerRecord = -1 // Allow variable columns if empty cells exist
 
-	// Read header
 	header, err := reader.Read()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read header: %w", err)
 	}
 
-	// Default indices based on standard layout
 	timeIdx := 0
 	artistIdx := 1
 	titleIdx := 2
 	showIdx := 3
 	featuredIdx := 4
 
-	// Map headers case-insensitively to support sheets with extra columns (e.g. State, Location)
 	for i, h := range header {
 		cleanH := strings.ToLower(strings.TrimSpace(h))
 		if strings.Contains(cleanH, "time") || strings.Contains(cleanH, "date") {
@@ -157,7 +205,6 @@ func parseCSVStream(r io.Reader) ([]Track, map[string]struct{}, error) {
 	var tracks []Track
 	showSet := make(map[string]struct{})
 
-	// Supported date formats
 	timeFormats := []string{
 		"1/2/2006 15:04:05",
 		"01/02/2006 15:04:05",
@@ -226,9 +273,18 @@ func parseCSVStream(r io.Reader) ([]Track, map[string]struct{}, error) {
 
 // LoadFromCSV reads CSV data and populates memory.
 func (ds *DataStore) LoadFromCSV(r io.Reader) error {
-	tracks, showSet, err := parseCSVStream(r)
+	tracks, _, err := parseCSVStream(r)
 	if err != nil {
 		return err
+	}
+
+	tracks = unifyShowNames(tracks)
+
+	showSet := make(map[string]struct{})
+	for _, tr := range tracks {
+		if tr.ShowName != "" {
+			showSet[tr.ShowName] = struct{}{}
+		}
 	}
 
 	var shows []string
@@ -254,7 +310,6 @@ func (ds *DataStore) FetchRemote() error {
 
 	spreadsheetID := ExtractSpreadsheetID(ds.SourceURL)
 	if spreadsheetID == "" {
-		// Fallback for direct non-Google-Sheet URLs
 		resp, err := http.Get(ds.SourceURL)
 		if err != nil {
 			return fmt.Errorf("HTTP get failed: %w", err)
@@ -272,7 +327,6 @@ func (ds *DataStore) FetchRemote() error {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var allTracks []Track
-	showSet := make(map[string]struct{})
 
 	for _, gid := range gids {
 		wg.Add(1)
@@ -291,7 +345,7 @@ func (ds *DataStore) FetchRemote() error {
 				return
 			}
 
-			tracks, shows, err := parseCSVStream(resp.Body)
+			tracks, _, err := parseCSVStream(resp.Body)
 			if err != nil {
 				log.Printf("Failed to parse CSV for gid %s: %v", g, err)
 				return
@@ -299,9 +353,6 @@ func (ds *DataStore) FetchRemote() error {
 
 			mu.Lock()
 			allTracks = append(allTracks, tracks...)
-			for s := range shows {
-				showSet[s] = struct{}{}
-			}
 			log.Printf("Successfully loaded %d tracks from gid %s", len(tracks), g)
 			mu.Unlock()
 		}(gid)
@@ -310,6 +361,16 @@ func (ds *DataStore) FetchRemote() error {
 
 	if len(allTracks) == 0 {
 		return fmt.Errorf("no tracks successfully loaded from any tab")
+	}
+
+	// Unify show name variations, typos, casing, and leading "The" across all tabs
+	allTracks = unifyShowNames(allTracks)
+
+	showSet := make(map[string]struct{})
+	for _, tr := range allTracks {
+		if tr.ShowName != "" {
+			showSet[tr.ShowName] = struct{}{}
+		}
 	}
 
 	var shows []string
@@ -324,7 +385,7 @@ func (ds *DataStore) FetchRemote() error {
 	ds.LastUpdated = time.Now()
 	ds.Unlock()
 
-	log.Printf("Successfully loaded %d total tracks across %d tabs and %d shows.", len(allTracks), len(gids), len(shows))
+	log.Printf("Successfully loaded %d total tracks across %d tabs and %d unified shows.", len(allTracks), len(gids), len(shows))
 	return nil
 }
 
