@@ -15,7 +15,7 @@ go 1.22
     filename: 'main.go',
     path: 'main.go',
     language: 'go',
-    description: 'Core Go server: HTTP server, embedded templates, CSV parser, and regex filter engine',
+    description: 'Core Go server: HTTP server, embedded templates, dynamic CSV header mapping, and regex filter engine',
     content: `package main
 
 import (
@@ -64,16 +64,39 @@ func NewDataStore(sourceURL string) *DataStore {
 	}
 }
 
-// LoadFromCSV reads CSV data and populates memory.
+// LoadFromCSV reads CSV data and populates memory with dynamic header mapping.
 func (ds *DataStore) LoadFromCSV(r io.Reader) error {
 	reader := csv.NewReader(r)
 	reader.LazyQuotes = true
 	reader.FieldsPerRecord = -1
 
 	// Read header
-	_, err := reader.Read()
+	header, err := reader.Read()
 	if err != nil {
 		return fmt.Errorf("failed to read header: %w", err)
+	}
+
+	// Default indices based on standard layout
+	timeIdx := 0
+	artistIdx := 1
+	titleIdx := 2
+	showIdx := 3
+	featuredIdx := 4
+
+	// Map headers case-insensitively to support sheets with extra columns (e.g. State, Location)
+	for i, h := range header {
+		cleanH := strings.ToLower(strings.TrimSpace(h))
+		if strings.Contains(cleanH, "time") || strings.Contains(cleanH, "date") {
+			timeIdx = i
+		} else if strings.Contains(cleanH, "artist") {
+			artistIdx = i
+		} else if strings.Contains(cleanH, "title") || strings.Contains(cleanH, "song") {
+			titleIdx = i
+		} else if strings.Contains(cleanH, "show") || strings.Contains(cleanH, "program") {
+			showIdx = i
+		} else if strings.Contains(cleanH, "feature") || strings.Contains(cleanH, "rotation") || strings.Contains(cleanH, "heavy") {
+			featuredIdx = i
+		}
 	}
 
 	var tracks []Track
@@ -84,6 +107,7 @@ func (ds *DataStore) LoadFromCSV(r io.Reader) error {
 		"01/02/2006 15:04:05",
 		"1/2/2006 15:04",
 		"2006-01-02 15:04:05",
+		"2006-01-02T15:04:05Z",
 	}
 
 	for {
@@ -91,16 +115,29 @@ func (ds *DataStore) LoadFromCSV(r io.Reader) error {
 		if err == io.EOF {
 			break
 		}
-		if err != nil || len(row) < 4 {
+		if err != nil {
 			continue
 		}
 
-		rawTime := strings.TrimSpace(row[0])
-		artist := strings.TrimSpace(row[1])
-		title := strings.TrimSpace(row[2])
-		show := strings.TrimSpace(row[3])
+		rawTime := ""
+		if timeIdx < len(row) {
+			rawTime = strings.TrimSpace(row[timeIdx])
+		}
+		artist := ""
+		if artistIdx < len(row) {
+			artist = strings.TrimSpace(row[artistIdx])
+		}
+		title := ""
+		if titleIdx < len(row) {
+			title = strings.TrimSpace(row[titleIdx])
+		}
+		show := ""
+		if showIdx < len(row) {
+			show = strings.TrimSpace(row[showIdx])
+		}
+
 		featured := false
-		if len(row) >= 5 && strings.EqualFold(strings.TrimSpace(row[4]), "yes") {
+		if featuredIdx < len(row) && (strings.EqualFold(strings.TrimSpace(row[featuredIdx]), "yes") || strings.EqualFold(strings.TrimSpace(row[featuredIdx]), "true") || strings.EqualFold(strings.TrimSpace(row[featuredIdx]), "1")) {
 			featured = true
 		}
 
@@ -339,7 +376,7 @@ func handleRefresh(w http.ResponseWriter, r *http.Request) {
             </div>
             <div class="checkbox-container">
                 <input type="checkbox" id="featured" name="featured">
-                <label for="featured" style="margin:0;">Heavy Rotation Only</label>
+                <label for="fixed" style="margin:0;">Heavy Rotation Only</label>
             </div>
         </div>
     </form>
