@@ -131,11 +131,64 @@ func DiscoverGIDs(spreadsheetID string) []string {
 	return gids
 }
 
+// normalizeShowKey creates a normalized key for grouping typo variants, casing, and spacing.
+func normalizeShowKey(name string) string {
+	s := strings.ToLower(strings.TrimSpace(name))
+	s = strings.TrimPrefix(s, "the ")
+	re := regexp.MustCompile(`[^a-z0-9]`)
+	return re.ReplaceAllString(s, "")
+}
+
+// unifyShowNames groups similar show names (typos, casing, leading "The") and maps them to a single canonical display name.
+func unifyShowNames(tracks []Track) []Track {
+	rawCounts := make(map[string]int)
+	for _, tr := range tracks {
+		cleaned := strings.TrimSpace(tr.ShowName)
+		if cleaned != "" {
+			rawCounts[cleaned]++
+		}
+	}
+
+	keyToRaws := make(map[string][]string)
+	for raw := range rawCounts {
+		key := normalizeShowKey(raw)
+		keyToRaws[key] = append(keyToRaws[key], raw)
+	}
+
+	canonicalMap := make(map[string]string)
+	for _, raws := range keyToRaws {
+		bestRaw := raws[0]
+		maxCount := rawCounts[bestRaw]
+		for _, r := range raws {
+			if rawCounts[r] > maxCount {
+				bestRaw = r
+				maxCount = rawCounts[r]
+			} else if rawCounts[r] == maxCount {
+				if len(r) > len(bestRaw) {
+					bestRaw = r
+				}
+			}
+		}
+		for _, r := range raws {
+			canonicalMap[r] = bestRaw
+		}
+	}
+
+	for i := range tracks {
+		cleaned := strings.TrimSpace(tracks[i].ShowName)
+		if canonical, exists := canonicalMap[cleaned]; exists {
+			tracks[i].ShowName = canonical
+		}
+	}
+
+	return tracks
+}
+
 // parseCSVStream parses CSV rows from a reader into Tracks and a set of Shows.
 func parseCSVStream(r io.Reader) ([]Track, map[string]struct{}, error) {
 	reader := csv.NewReader(r)
 	reader.LazyQuotes = true
-	reader.FieldsPerRecord = -1 // Allow variable columns if empty cells exist
+	reader.FieldsPerRecord = -1
 
 	header, err := reader.Read()
 	if err != nil {
@@ -232,7 +285,7 @@ func parseCSVStream(r io.Reader) ([]Track, map[string]struct{}, error) {
 	return tracks, showSet, nil
 }
 
-// FetchRemote loads show names strictly from the first tab (gid=0) and all tracks across all tabs.
+// FetchRemote loads show names strictly from the first tab (gid=0) with fuzzy unification, and all tracks across all tabs.
 func (ds *DataStore) FetchRemote() error {
 	if ds.SourceURL == "" {
 		return fmt.Errorf("no SourceURL configured")
@@ -248,15 +301,20 @@ func (ds *DataStore) FetchRemote() error {
 		if resp.StatusCode != http.StatusOK {
 			return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 		}
-		tracks, showSet, err := parseCSVStream(resp.Body)
+		tracks, _, err := parseCSVStream(resp.Body)
 		if err != nil {
 			return err
 		}
+		tracks = unifyShowNames(tracks)
+		showSet := make(map[string]struct{})
+		for _, tr := range tracks {
+			if tr.ShowName != "" {
+				showSet[tr.ShowName] = struct{}{}
+			}
+		}
 		var shows []string
 		for s := range showSet {
-			if s != "" {
-				shows = append(shows, s)
-			}
+			shows = append(shows, s)
 		}
 		sort.Strings(shows)
 
@@ -268,27 +326,48 @@ func (ds *DataStore) FetchRemote() error {
 		return nil
 	}
 
-	// 1. Fetch gid=0 specifically for clean, recent show dropdown
-	exportURL0 := fmt.Sprintf("https://docs.google.com/spreadsheets/d/%s/export?format=csv&gid=0", spreadsheetID)
-	resp0, err := http.Get(exportURL0)
-	var recentShows []string
-	if err == nil && resp0.StatusCode == http.StatusOK {
-		_, showSet0, err := parseCSVStream(resp0.Body)
-		resp0.Body.Close()
-		if err == nil {
-			for s := range showSet0 {
-				if s != "" {
-					recentShows = append(recentShows, s)
-				}
-			}
-			sort.Strings(recentShows)
-		}
-	}
-
-	// 2. Fetch all tabs for full historical tracks
 	gids := DiscoverGIDs(spreadsheetID)
 	log.Printf("Fetching %d tab(s) for spreadsheet ID %s: %v", len(gids), spreadsheetID, gids)
 
+	// 1. Fetch gid=0 specifically for the first tab's shows, and apply fuzzy unification
+	exportURL0 := fmt.Sprintf("https://docs.google.com/spreadsheets/d/%s/export?format=csv&gid=0", spreadsheetID)
+	resp0, err := http.Get(exportURL0)
+	var firstTabTracks []Track
+	if err == nil && resp0.StatusCode == http.StatusOK {
+		tracks0, _, err := parseCSVStream(resp0.Body)
+		resp0.Body.Close()
+		if err == nil {
+			firstTabTracks = tracks0
+		}
+	}
+
+	if len(firstTabTracks) == 0 && len(gids) > 0 {
+		exportURLFirst := fmt.Sprintf("https://docs.google.com/spreadsheets/d/%s/export?format=csv&gid=%s", spreadsheetID, gids[0])
+		respFirst, err := http.Get(exportURLFirst)
+		if err == nil && respFirst.StatusCode == http.StatusOK {
+			tracksFirst, _, err := parseCSVStream(respFirst.Body)
+			respFirst.Body.Close()
+			if err == nil {
+				firstTabTracks = tracksFirst
+			}
+		}
+	}
+
+	// Unify show names on the first tab
+	firstTabTracks = unifyShowNames(firstTabTracks)
+	showSetFirst := make(map[string]struct{})
+	for _, tr := range firstTabTracks {
+		if tr.ShowName != "" {
+			showSetFirst[tr.ShowName] = struct{}{}
+		}
+	}
+	var recentShows []string
+	for s := range showSetFirst {
+		recentShows = append(recentShows, s)
+	}
+	sort.Strings(recentShows)
+
+	// 2. Fetch all tabs concurrently for comprehensive historical tracks
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var allTracks []Track
@@ -324,8 +403,14 @@ func (ds *DataStore) FetchRemote() error {
 		return fmt.Errorf("no tracks successfully loaded from any tab")
 	}
 
-	// If recentShows is empty, fallback to shows from all tracks
+	// Unify historical tracks as well
+	allTracks = unifyShowNames(allTracks)
+
+	// If recentShows is empty for some reason, fallback to first tab or all tracks unified shows
 	if len(recentShows) == 0 {
+		for _, s := range recentShows {
+			_ = s
+		}
 		showSetAll := make(map[string]struct{})
 		for _, tr := range allTracks {
 			if tr.ShowName != "" {
@@ -344,7 +429,7 @@ func (ds *DataStore) FetchRemote() error {
 	ds.LastUpdated = time.Now()
 	ds.Unlock()
 
-	log.Printf("Successfully loaded %d total tracks across %d tabs with %d clean shows from first tab.", len(allTracks), len(gids), len(recentShows))
+	log.Printf("Successfully loaded %d total tracks across %d tabs with %d unified clean shows from the first tab.", len(allTracks), len(gids), len(recentShows))
 	return nil
 }
 
