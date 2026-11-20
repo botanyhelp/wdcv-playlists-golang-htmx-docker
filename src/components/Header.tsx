@@ -1,9 +1,9 @@
 import React from 'react';
-import { Radio, Code2, Cloud, Sparkles, Database } from 'lucide-react';
+import { Radio, Code2, Cloud, Database } from 'lucide-react';
 
 interface HeaderProps {
-  activeTab: 'explorer' | 'code' | 'deploy' | 'ai';
-  setActiveTab: (tab: 'explorer' | 'code' | 'deploy' | 'ai') => void;
+  activeTab: 'explorer' | 'code' | 'deploy';
+  setActiveTab: (tab: 'explorer' | 'code' | 'deploy') => void;
   trackCount: number;
 }
 
@@ -63,18 +63,6 @@ export const Header: React.FC<HeaderProps> = ({ activeTab, setActiveTab, trackCo
           >
             <Cloud className="w-4 h-4" />
             <span>GCP Cloud Run Deploy</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('ai')}
-            className={`flex items-center space-x-2 px-3.5 py-2 rounded-lg text-xs font-medium transition-all ${
-              activeTab === 'ai'
-                ? 'bg-blue-600 text-white shadow'
-                : 'text-slate-300 hover:text-white hover:bg-slate-700/50'
-            }`}
-          >
-            <Sparkles className="w-4 h-4 text-amber-400" />
-            <span>Gemini AI Assistant</span>
           </button>
         </nav>
       </div>

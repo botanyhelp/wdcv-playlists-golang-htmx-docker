@@ -3,12 +3,11 @@ import { Header } from './components/Header';
 import { PlaylistExplorer } from './components/PlaylistExplorer';
 import { CodeHub } from './components/CodeHub';
 import { CloudRunGuide } from './components/CloudRunGuide';
-import { AiAssistant } from './components/AiAssistant';
 import { INITIAL_TRACKS } from './data/sampleTracks';
 import { Track } from './types';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'explorer' | 'code' | 'deploy' | 'ai'>('explorer');
+  const [activeTab, setActiveTab] = useState<'explorer' | 'code' | 'deploy'>('explorer');
   const [tracks, setTracks] = useState<Track[]>(INITIAL_TRACKS);
 
   const handleAddTrack = (newTrack: Track) => {
@@ -16,8 +15,7 @@ export default function App() {
   };
 
   const handleRefreshCSV = (_url: string) => {
-    // Simulate loading/refreshing or reloading sample data + new tracks
-    // In a real app this fetches from the CSV URL
+    // Simulate loading/refreshing CSV data
   };
 
   return (
@@ -30,7 +28,6 @@ export default function App() {
         )}
         {activeTab === 'code' && <CodeHub />}
         {activeTab === 'deploy' && <CloudRunGuide />}
-        {activeTab === 'ai' && <AiAssistant tracks={tracks} />}
       </main>
     </div>
   );
