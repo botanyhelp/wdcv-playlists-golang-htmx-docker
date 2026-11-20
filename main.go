@@ -11,6 +11,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,12 +25,25 @@ var (
 	store     *DataStore
 )
 
+const PageSize = 50
+
 type Track struct {
 	Timestamp  time.Time
 	Artist     string
 	Title      string
 	ShowName   string
 	IsFeatured bool
+}
+
+type FilterResult struct {
+	Tracks      []Track
+	TotalCount  int
+	CurrentPage int
+	TotalPages  int
+	HasNext     bool
+	HasPrev     bool
+	NextPage    int
+	PrevPage    int
 }
 
 type DataStore struct {
@@ -115,59 +129,6 @@ func DiscoverGIDs(spreadsheetID string) []string {
 
 	log.Printf("Discovered total %d unique tab gid(s) for spreadsheet %s: %v", len(gids), spreadsheetID, gids)
 	return gids
-}
-
-// normalizeShowKey creates a normalized key for grouping typo variants and casing differences.
-func normalizeShowKey(name string) string {
-	s := strings.ToLower(strings.TrimSpace(name))
-	s = strings.TrimPrefix(s, "the ")
-	re := regexp.MustCompile(`[^a-z0-9]`)
-	return re.ReplaceAllString(s, "")
-}
-
-// unifyShowNames groups similar show names (typos, casing, leading "The") and maps them to a single canonical display name.
-func unifyShowNames(tracks []Track) []Track {
-	rawCounts := make(map[string]int)
-	for _, tr := range tracks {
-		cleaned := strings.TrimSpace(tr.ShowName)
-		if cleaned != "" {
-			rawCounts[cleaned]++
-		}
-	}
-
-	keyToRaws := make(map[string][]string)
-	for raw := range rawCounts {
-		key := normalizeShowKey(raw)
-		keyToRaws[key] = append(keyToRaws[key], raw)
-	}
-
-	canonicalMap := make(map[string]string)
-	for _, raws := range keyToRaws {
-		bestRaw := raws[0]
-		maxCount := rawCounts[bestRaw]
-		for _, r := range raws {
-			if rawCounts[r] > maxCount {
-				bestRaw = r
-				maxCount = rawCounts[r]
-			} else if rawCounts[r] == maxCount {
-				if len(r) > len(bestRaw) {
-					bestRaw = r
-				}
-			}
-		}
-		for _, r := range raws {
-			canonicalMap[r] = bestRaw
-		}
-	}
-
-	for i := range tracks {
-		cleaned := strings.TrimSpace(tracks[i].ShowName)
-		if canonical, exists := canonicalMap[cleaned]; exists {
-			tracks[i].ShowName = canonical
-		}
-	}
-
-	return tracks
 }
 
 // parseCSVStream parses CSV rows from a reader into Tracks and a set of Shows.
@@ -256,14 +217,14 @@ func parseCSVStream(r io.Reader) ([]Track, map[string]struct{}, error) {
 		}
 
 		if show != "" {
-			showSet[show] = struct{}{}
+			showSet[strings.TrimSpace(show)] = struct{}{}
 		}
 
 		tracks = append(tracks, Track{
 			Timestamp:  parsedTime,
 			Artist:     artist,
 			Title:      title,
-			ShowName:   show,
+			ShowName:   strings.TrimSpace(show),
 			IsFeatured: featured,
 		})
 	}
@@ -271,38 +232,7 @@ func parseCSVStream(r io.Reader) ([]Track, map[string]struct{}, error) {
 	return tracks, showSet, nil
 }
 
-// LoadFromCSV reads CSV data and populates memory.
-func (ds *DataStore) LoadFromCSV(r io.Reader) error {
-	tracks, _, err := parseCSVStream(r)
-	if err != nil {
-		return err
-	}
-
-	tracks = unifyShowNames(tracks)
-
-	showSet := make(map[string]struct{})
-	for _, tr := range tracks {
-		if tr.ShowName != "" {
-			showSet[tr.ShowName] = struct{}{}
-		}
-	}
-
-	var shows []string
-	for s := range showSet {
-		shows = append(shows, s)
-	}
-	sort.Strings(shows)
-
-	ds.Lock()
-	ds.Tracks = tracks
-	ds.Shows = shows
-	ds.LastUpdated = time.Now()
-	ds.Unlock()
-
-	return nil
-}
-
-// FetchRemote automatically discovers all tabs (gids) in a Google Sheet and fetches them concurrently.
+// FetchRemote loads show names strictly from the first tab (gid=0) and all tracks across all tabs.
 func (ds *DataStore) FetchRemote() error {
 	if ds.SourceURL == "" {
 		return fmt.Errorf("no SourceURL configured")
@@ -318,9 +248,44 @@ func (ds *DataStore) FetchRemote() error {
 		if resp.StatusCode != http.StatusOK {
 			return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 		}
-		return ds.LoadFromCSV(resp.Body)
+		tracks, showSet, err := parseCSVStream(resp.Body)
+		if err != nil {
+			return err
+		}
+		var shows []string
+		for s := range showSet {
+			if s != "" {
+				shows = append(shows, s)
+			}
+		}
+		sort.Strings(shows)
+
+		ds.Lock()
+		ds.Tracks = tracks
+		ds.Shows = shows
+		ds.LastUpdated = time.Now()
+		ds.Unlock()
+		return nil
 	}
 
+	// 1. Fetch gid=0 specifically for clean, recent show dropdown
+	exportURL0 := fmt.Sprintf("https://docs.google.com/spreadsheets/d/%s/export?format=csv&gid=0", spreadsheetID)
+	resp0, err := http.Get(exportURL0)
+	var recentShows []string
+	if err == nil && resp0.StatusCode == http.StatusOK {
+		_, showSet0, err := parseCSVStream(resp0.Body)
+		resp0.Body.Close()
+		if err == nil {
+			for s := range showSet0 {
+				if s != "" {
+					recentShows = append(recentShows, s)
+				}
+			}
+			sort.Strings(recentShows)
+		}
+	}
+
+	// 2. Fetch all tabs for full historical tracks
 	gids := DiscoverGIDs(spreadsheetID)
 	log.Printf("Fetching %d tab(s) for spreadsheet ID %s: %v", len(gids), spreadsheetID, gids)
 
@@ -335,25 +300,21 @@ func (ds *DataStore) FetchRemote() error {
 			exportURL := fmt.Sprintf("https://docs.google.com/spreadsheets/d/%s/export?format=csv&gid=%s", spreadsheetID, g)
 			resp, err := http.Get(exportURL)
 			if err != nil {
-				log.Printf("Failed to fetch gid %s: %v", g, err)
 				return
 			}
 			defer resp.Body.Close()
 
 			if resp.StatusCode != http.StatusOK {
-				log.Printf("Non-200 status for gid %s: %d", g, resp.StatusCode)
 				return
 			}
 
 			tracks, _, err := parseCSVStream(resp.Body)
 			if err != nil {
-				log.Printf("Failed to parse CSV for gid %s: %v", g, err)
 				return
 			}
 
 			mu.Lock()
 			allTracks = append(allTracks, tracks...)
-			log.Printf("Successfully loaded %d tracks from gid %s", len(tracks), g)
 			mu.Unlock()
 		}(gid)
 	}
@@ -363,33 +324,31 @@ func (ds *DataStore) FetchRemote() error {
 		return fmt.Errorf("no tracks successfully loaded from any tab")
 	}
 
-	// Unify show name variations, typos, casing, and leading "The" across all tabs
-	allTracks = unifyShowNames(allTracks)
-
-	showSet := make(map[string]struct{})
-	for _, tr := range allTracks {
-		if tr.ShowName != "" {
-			showSet[tr.ShowName] = struct{}{}
+	// If recentShows is empty, fallback to shows from all tracks
+	if len(recentShows) == 0 {
+		showSetAll := make(map[string]struct{})
+		for _, tr := range allTracks {
+			if tr.ShowName != "" {
+				showSetAll[tr.ShowName] = struct{}{}
+			}
 		}
+		for s := range showSetAll {
+			recentShows = append(recentShows, s)
+		}
+		sort.Strings(recentShows)
 	}
-
-	var shows []string
-	for s := range showSet {
-		shows = append(shows, s)
-	}
-	sort.Strings(shows)
 
 	ds.Lock()
 	ds.Tracks = allTracks
-	ds.Shows = shows
+	ds.Shows = recentShows
 	ds.LastUpdated = time.Now()
 	ds.Unlock()
 
-	log.Printf("Successfully loaded %d total tracks across %d tabs and %d unified shows.", len(allTracks), len(gids), len(shows))
+	log.Printf("Successfully loaded %d total tracks across %d tabs with %d clean shows from first tab.", len(allTracks), len(gids), len(recentShows))
 	return nil
 }
 
-func (ds *DataStore) Filter(show, songRegex, fromDate, toDate string, featuredOnly bool) []Track {
+func (ds *DataStore) Filter(show, songRegex, fromDate, toDate string, featuredOnly bool, page int) FilterResult {
 	ds.RLock()
 	defer ds.RUnlock()
 
@@ -408,7 +367,7 @@ func (ds *DataStore) Filter(show, songRegex, fromDate, toDate string, featuredOn
 		}
 	}
 
-	var results []Track
+	var matched []Track
 	for _, tr := range ds.Tracks {
 		if show != "" && tr.ShowName != show {
 			continue
@@ -425,10 +384,42 @@ func (ds *DataStore) Filter(show, songRegex, fromDate, toDate string, featuredOn
 		if !endT.IsZero() && tr.Timestamp.After(endT) {
 			continue
 		}
-		results = append(results, tr)
+		matched = append(matched, tr)
 	}
 
-	return results
+	totalCount := len(matched)
+	totalPages := (totalCount + PageSize - 1) / PageSize
+	if totalPages < 1 {
+		totalPages = 1
+	}
+	if page < 1 {
+		page = 1
+	}
+	if page > totalPages {
+		page = totalPages
+	}
+
+	startIdx := (page - 1) * PageSize
+	endIdx := startIdx + PageSize
+	if startIdx > totalCount {
+		startIdx = totalCount
+	}
+	if endIdx > totalCount {
+		endIdx = totalCount
+	}
+
+	pagedTracks := matched[startIdx:endIdx]
+
+	return FilterResult{
+		Tracks:      pagedTracks,
+		TotalCount:  totalCount,
+		CurrentPage: page,
+		TotalPages:  totalPages,
+		HasNext:     page < totalPages,
+		HasPrev:     page > 1,
+		NextPage:    page + 1,
+		PrevPage:    page - 1,
+	}
 }
 
 func main() {
@@ -468,12 +459,12 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 	store.RLock()
 	data := struct {
 		Shows       []string
-		Tracks      []Track
 		LastUpdated string
+		Result      FilterResult
 	}{
 		Shows:       store.Shows,
-		Tracks:      store.Tracks,
 		LastUpdated: store.LastUpdated.Format("Jan 02, 2006 15:04:05 MST"),
+		Result:      store.Filter("", "", "", "", false, 1),
 	}
 	store.RUnlock()
 
@@ -487,8 +478,15 @@ func handleFilterTracks(w http.ResponseWriter, r *http.Request) {
 	toDate := r.URL.Query().Get("to")
 	featured := r.URL.Query().Get("featured") == "on"
 
-	filtered := store.Filter(show, regex, fromDate, toDate, featured)
-	templates.ExecuteTemplate(w, "track_rows.html", filtered)
+	page := 1
+	if pStr := r.URL.Query().Get("page"); pStr != "" {
+		if p, err := strconv.Atoi(pStr); err == nil {
+			page = p
+		}
+	}
+
+	result := store.Filter(show, regex, fromDate, toDate, featured, page)
+	templates.ExecuteTemplate(w, "track_rows.html", result)
 }
 
 func handleRefresh(w http.ResponseWriter, r *http.Request) {

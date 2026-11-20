@@ -42,9 +42,9 @@
     <form hx-get="/tracks" hx-target="#results-body" hx-trigger="input from:input delay:250ms, change from:select, change from:input[type='checkbox']">
         <div class="form-grid">
             <div>
-                <label for="show">Show</label>
+                <label for="show">Show (Current Tab)</label>
                 <select name="show" id="show">
-                    <option value="">-- All Shows --</option>
+                    <option value="">-- All Shows (Includes Historical) --</option>
                     {{range .Shows}}
                     <option value="{{.}}">{{.}}</option>
                     {{end}}
@@ -81,7 +81,7 @@
         </tr>
     </thead>
     <tbody id="results-body">
-        {{template "track_rows.html" .Tracks}}
+        {{template "track_rows.html" .Result}}
     </tbody>
 </table>
 

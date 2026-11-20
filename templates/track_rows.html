@@ -1,4 +1,4 @@
-{{range .}}
+{{range .Tracks}}
 <tr>
     <td>{{.Timestamp.Format "01/02/2006 15:04"}}</td>
     <td><strong>{{.Artist}}</strong></td>
@@ -15,3 +15,23 @@
     <td colspan="5" style="text-align:center; padding: 2rem; color: #888;">No tracks found matching your filter criteria.</td>
 </tr>
 {{end}}
+<tr>
+    <td colspan="5" style="background: #f9fafb; padding: 0.75rem 1rem; border-top: 2px solid #eee;">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <span style="font-size: 0.85rem; color: #555;">Page <strong>{{.CurrentPage}}</strong> of <strong>{{.TotalPages}}</strong> ({{.TotalCount}} tracks)</span>
+            <div style="display: flex; gap: 0.5rem;">
+                {{if .HasPrev}}
+                <button hx-get="/tracks?page={{.PrevPage}}" hx-include="form" hx-target="#results-body" type="button" style="padding: 0.25rem 0.75rem; font-size: 0.85rem; background: #0066cc; color: white; border: none; border-radius: 4px; cursor: pointer;">Previous</button>
+                {{else}}
+                <button disabled style="padding: 0.25rem 0.75rem; font-size: 0.85rem; opacity: 0.5; cursor: not-allowed; background: #ccc; color: #666; border: none; border-radius: 4px;" type="button">Previous</button>
+                {{end}}
+
+                {{if .HasNext}}
+                <button hx-get="/tracks?page={{.NextPage}}" hx-include="form" hx-target="#results-body" type="button" style="padding: 0.25rem 0.75rem; font-size: 0.85rem; background: #0066cc; color: white; border: none; border-radius: 4px; cursor: pointer;">Next</button>
+                {{else}}
+                <button disabled style="padding: 0.25rem 0.75rem; font-size: 0.85rem; opacity: 0.5; cursor: not-allowed; background: #ccc; color: #666; border: none; border-radius: 4px;" type="button">Next</button>
+                {{end}}
+            </div>
+        </div>
+    </td>
+</tr>
