@@ -27,6 +27,11 @@ var (
 
 const PageSize = 50
 
+// Authoritative list of show names provided by the user
+var officialShowsList = []string{
+	"Alden", "All Roads", "alphabet soup", "Amana Bacon Radio Show", "aux on air", "Aux on Air", "bananapants", "Bell Bottom Blues", "BIOHAZARD", "Blue Hour", "Buckit!", "Canadian Tuxedo", "Carnation Station", "cellular", "cellular!", "Cranberry Juice", "Cranberry Juice!", "Curtain Call", "danielles punk rock hour!", "danielles punk rock hour! ", "day vixian", "DJ Joe George presents DIG!", "Dolly Parton Tribute Hour", "Ella Melrose Training #2", "El-on-Air", "El-On-Air", "Encore!", "etcetera...", "Etcetera...", "Etcetera... ", "Fake Tunes", "Fletcher Brown", "Goblin Tar Pit", "Hyperfix-statin", "hYPERFIX-STATION", "Hyperfix-station", "Hyperfix-station ", "Hyperfix-Station", "Hyperpopower", "inside elia's mind", "inside elias mind", "Inside elia's mind", "Internatinal Our", "International our", "International Our", "Internayional Our", "Jacksons Jams", "James Hicks", "James Hicks show", "James Hicks Show", "knox aux", "knox on aux", "Knox on Aux", "KONKRETE", "Ladybug Spots", "livewire", "live with liv", "Loose Ends", "Lounging with Lily ", "Margaret", "Margaret Nelson", "Marigold", "mayas magic hour", "mayas magic hr", "Mayas Magic Hr", "mini mamdani's", "Mini Mamdani's", "Mini Mamdani's ", "miscellaneous", "Must Be Hearing in On Things", "Must be Hearing Things", "Must Be hearing Things", "Must Be Hearing Things", "Must Be HEaring things", "MUST BE HEARING THINGS", "My Cup of Jo", "My Cup of JO", "Nico", "Nico & Fletch pre o", "Nico & Fletch Pre o", "No name #3", "No Name #3", "opening act", "opening act (+ training)", "Oskar's Training Session 2", "Oskar's Variety Hour", "Oxygen", "pre o", "pre o ", "Queen of Soup", "Record Rewind", "Record Rewind ", "Ryan 2nd Training ", "Ryan Second Training ", "Ryan Training", "Ryan Training ", "Sarah R", "Sarah R.", "scarlette & becky", "scarlette & becky's show", "science fiction/double feature", "Show Name", "Showtimes Showcase", "Showtunes", "Showtune Showcase", "Sierra's Sunshine Hour", "songs after the storm", "Spotlight on Sinatra", "SUBJECT TO CHANGE", "supasonic", "Swan Songs", "take a walk", "Take a Walk", "Take A Walk", "Talk A Walk", "taxikab", "taxikab!", "That's What You Missed", "the aud hour", "The Bronze", "The Crossroads", "The drift", "The Drift", "The Drift ", "The Eclipse", "The Flo", "The Flo ", "The Industry Punks", "The Radio of Kullerluk City (ROKC)", "The Radio of Kullerluk City (ROKC) ", "The ROKC", "The Space Station", "The Spirit of Radio", "The Spirit of Radio ", "The Testers", "The Tests", "Tilly Tunes", "Time", "Timeout", "time to claire the air", "Tucker's Radio Hour", "Tucker's Radio Hour ", "xnox on aux",
+}
+
 type Track struct {
 	Timestamp  time.Time
 	Artist     string
@@ -144,7 +149,7 @@ func unifyShowNames(tracks []Track) []Track {
 	rawCounts := make(map[string]int)
 	for _, tr := range tracks {
 		cleaned := strings.TrimSpace(tr.ShowName)
-		if cleaned != "" {
+		if cleaned != "" && !strings.EqualFold(cleaned, "show name") {
 			rawCounts[cleaned]++
 		}
 	}
@@ -184,7 +189,7 @@ func unifyShowNames(tracks []Track) []Track {
 	return tracks
 }
 
-// parseCSVStream parses CSV rows from a reader into Tracks and a set of Shows.
+// parseCSVStream parses CSV rows from a reader strictly using Column D (index 3) for Show Name.
 func parseCSVStream(r io.Reader) ([]Track, map[string]struct{}, error) {
 	reader := csv.NewReader(r)
 	reader.LazyQuotes = true
@@ -198,9 +203,10 @@ func parseCSVStream(r io.Reader) ([]Track, map[string]struct{}, error) {
 	timeIdx := 0
 	artistIdx := 1
 	titleIdx := 2
-	showIdx := 3
+	showIdx := 3 // Explicitly Column D (0-indexed 3)
 	featuredIdx := 4
 
+	// Optional check if header explicitly defines columns
 	for i, h := range header {
 		cleanH := strings.ToLower(strings.TrimSpace(h))
 		if strings.Contains(cleanH, "time") || strings.Contains(cleanH, "date") {
@@ -209,7 +215,7 @@ func parseCSVStream(r io.Reader) ([]Track, map[string]struct{}, error) {
 			artistIdx = i
 		} else if strings.Contains(cleanH, "title") || strings.Contains(cleanH, "song") {
 			titleIdx = i
-		} else if strings.Contains(cleanH, "show") || strings.Contains(cleanH, "program") {
+		} else if strings.Contains(cleanH, "show name") || cleanH == "show" {
 			showIdx = i
 		} else if strings.Contains(cleanH, "feature") || strings.Contains(cleanH, "rotation") || strings.Contains(cleanH, "heavy") {
 			featuredIdx = i
@@ -256,6 +262,11 @@ func parseCSVStream(r io.Reader) ([]Track, map[string]struct{}, error) {
 			show = strings.TrimSpace(row[showIdx])
 		}
 
+		// Skip header rows accidentally repeated in data
+		if strings.EqualFold(show, "show name") || strings.EqualFold(show, "show") {
+			continue
+		}
+
 		featured := false
 		if featuredIdx < len(row) && (strings.EqualFold(strings.TrimSpace(row[featuredIdx]), "yes") || strings.EqualFold(strings.TrimSpace(row[featuredIdx]), "true") || strings.EqualFold(strings.TrimSpace(row[featuredIdx]), "1")) {
 			featured = true
@@ -269,15 +280,16 @@ func parseCSVStream(r io.Reader) ([]Track, map[string]struct{}, error) {
 			}
 		}
 
-		if show != "" {
-			showSet[strings.TrimSpace(show)] = struct{}{}
+		cleanedShow := strings.TrimSpace(show)
+		if cleanedShow != "" {
+			showSet[cleanedShow] = struct{}{}
 		}
 
 		tracks = append(tracks, Track{
 			Timestamp:  parsedTime,
 			Artist:     artist,
 			Title:      title,
-			ShowName:   strings.TrimSpace(show),
+			ShowName:   cleanedShow,
 			IsFeatured: featured,
 		})
 	}
@@ -285,7 +297,7 @@ func parseCSVStream(r io.Reader) ([]Track, map[string]struct{}, error) {
 	return tracks, showSet, nil
 }
 
-// FetchRemote loads show names strictly from the first tab (gid=0) with fuzzy unification, and all tracks across all tabs.
+// FetchRemote loads show names using the official user-provided show list + first tab Column D, unified.
 func (ds *DataStore) FetchRemote() error {
 	if ds.SourceURL == "" {
 		return fmt.Errorf("no SourceURL configured")
@@ -308,7 +320,7 @@ func (ds *DataStore) FetchRemote() error {
 		tracks = unifyShowNames(tracks)
 		showSet := make(map[string]struct{})
 		for _, tr := range tracks {
-			if tr.ShowName != "" {
+			if tr.ShowName != "" && !strings.EqualFold(tr.ShowName, "show name") {
 				showSet[tr.ShowName] = struct{}{}
 			}
 		}
@@ -329,45 +341,40 @@ func (ds *DataStore) FetchRemote() error {
 	gids := DiscoverGIDs(spreadsheetID)
 	log.Printf("Fetching %d tab(s) for spreadsheet ID %s: %v", len(gids), spreadsheetID, gids)
 
-	// 1. Fetch gid=0 specifically for the first tab's shows, and apply fuzzy unification
+	// Build initial show pool from the user's official shows list
+	showTrackPool := []Track{}
+	for _, s := range officialShowsList {
+		if s != "" && !strings.EqualFold(s, "show name") {
+			showTrackPool = append(showTrackPool, Track{ShowName: s})
+		}
+	}
+
+	// Also fetch first tab (gid=0) Column D values to include any recent shows
 	exportURL0 := fmt.Sprintf("https://docs.google.com/spreadsheets/d/%s/export?format=csv&gid=0", spreadsheetID)
 	resp0, err := http.Get(exportURL0)
-	var firstTabTracks []Track
 	if err == nil && resp0.StatusCode == http.StatusOK {
 		tracks0, _, err := parseCSVStream(resp0.Body)
 		resp0.Body.Close()
 		if err == nil {
-			firstTabTracks = tracks0
+			showTrackPool = append(showTrackPool, tracks0...)
 		}
 	}
 
-	if len(firstTabTracks) == 0 && len(gids) > 0 {
-		exportURLFirst := fmt.Sprintf("https://docs.google.com/spreadsheets/d/%s/export?format=csv&gid=%s", spreadsheetID, gids[0])
-		respFirst, err := http.Get(exportURLFirst)
-		if err == nil && respFirst.StatusCode == http.StatusOK {
-			tracksFirst, _, err := parseCSVStream(respFirst.Body)
-			respFirst.Body.Close()
-			if err == nil {
-				firstTabTracks = tracksFirst
-			}
+	// Unify show names for the dropdown list
+	showTrackPool = unifyShowNames(showTrackPool)
+	showSetUnique := make(map[string]struct{})
+	for _, tr := range showTrackPool {
+		if tr.ShowName != "" && !strings.EqualFold(tr.ShowName, "show name") {
+			showSetUnique[tr.ShowName] = struct{}{}
 		}
 	}
-
-	// Unify show names on the first tab
-	firstTabTracks = unifyShowNames(firstTabTracks)
-	showSetFirst := make(map[string]struct{})
-	for _, tr := range firstTabTracks {
-		if tr.ShowName != "" {
-			showSetFirst[tr.ShowName] = struct{}{}
-		}
+	var canonicalShows []string
+	for s := range showSetUnique {
+		canonicalShows = append(canonicalShows, s)
 	}
-	var recentShows []string
-	for s := range showSetFirst {
-		recentShows = append(recentShows, s)
-	}
-	sort.Strings(recentShows)
+	sort.Strings(canonicalShows)
 
-	// 2. Fetch all tabs concurrently for comprehensive historical tracks
+	// Fetch all tabs concurrently for comprehensive historical tracks
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var allTracks []Track
@@ -406,30 +413,13 @@ func (ds *DataStore) FetchRemote() error {
 	// Unify historical tracks as well
 	allTracks = unifyShowNames(allTracks)
 
-	// If recentShows is empty for some reason, fallback to first tab or all tracks unified shows
-	if len(recentShows) == 0 {
-		for _, s := range recentShows {
-			_ = s
-		}
-		showSetAll := make(map[string]struct{})
-		for _, tr := range allTracks {
-			if tr.ShowName != "" {
-				showSetAll[tr.ShowName] = struct{}{}
-			}
-		}
-		for s := range showSetAll {
-			recentShows = append(recentShows, s)
-		}
-		sort.Strings(recentShows)
-	}
-
 	ds.Lock()
 	ds.Tracks = allTracks
-	ds.Shows = recentShows
+	ds.Shows = canonicalShows
 	ds.LastUpdated = time.Now()
 	ds.Unlock()
 
-	log.Printf("Successfully loaded %d total tracks across %d tabs with %d unified clean shows from the first tab.", len(allTracks), len(gids), len(recentShows))
+	log.Printf("Successfully loaded %d total tracks across %d tabs with %d unified clean shows in dropdown.", len(allTracks), len(gids), len(canonicalShows))
 	return nil
 }
 
