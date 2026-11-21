@@ -189,13 +189,15 @@ func unifyShowNames(tracks []Track) []Track {
 	return tracks
 }
 
-// parseCSVStream parses CSV rows from a reader strictly using Column D (index 3) for Show Name.
+// parseCSVStream parses CSV rows using strict fixed column layout:
+// Col A (0): Timestamp, Col B (1): Artist, Col C (2): Song Title, Col D (3): Show Name, Col E (4): Heavy Rotation
 func parseCSVStream(r io.Reader) ([]Track, map[string]struct{}, error) {
 	reader := csv.NewReader(r)
 	reader.LazyQuotes = true
 	reader.FieldsPerRecord = -1
 
-	header, err := reader.Read()
+	// Read and discard header
+	_, err := reader.Read()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to read header: %w", err)
 	}
@@ -203,24 +205,8 @@ func parseCSVStream(r io.Reader) ([]Track, map[string]struct{}, error) {
 	timeIdx := 0
 	artistIdx := 1
 	titleIdx := 2
-	showIdx := 3 // Explicitly Column D (0-indexed 3)
+	showIdx := 3
 	featuredIdx := 4
-
-	// Optional check if header explicitly defines columns
-	for i, h := range header {
-		cleanH := strings.ToLower(strings.TrimSpace(h))
-		if strings.Contains(cleanH, "time") || strings.Contains(cleanH, "date") {
-			timeIdx = i
-		} else if strings.Contains(cleanH, "artist") {
-			artistIdx = i
-		} else if strings.Contains(cleanH, "title") || strings.Contains(cleanH, "song") {
-			titleIdx = i
-		} else if strings.Contains(cleanH, "show name") || cleanH == "show" {
-			showIdx = i
-		} else if strings.Contains(cleanH, "feature") || strings.Contains(cleanH, "rotation") || strings.Contains(cleanH, "heavy") {
-			featuredIdx = i
-		}
-	}
 
 	var tracks []Track
 	showSet := make(map[string]struct{})
@@ -263,7 +249,7 @@ func parseCSVStream(r io.Reader) ([]Track, map[string]struct{}, error) {
 		}
 
 		// Skip header rows accidentally repeated in data
-		if strings.EqualFold(show, "show name") || strings.EqualFold(show, "show") {
+		if strings.EqualFold(show, "show name") || strings.EqualFold(show, "show") || strings.EqualFold(artist, "artist") {
 			continue
 		}
 
@@ -341,7 +327,6 @@ func (ds *DataStore) FetchRemote() error {
 	gids := DiscoverGIDs(spreadsheetID)
 	log.Printf("Fetching %d tab(s) for spreadsheet ID %s: %v", len(gids), spreadsheetID, gids)
 
-	// Build initial show pool from the user's official shows list
 	showTrackPool := []Track{}
 	for _, s := range officialShowsList {
 		if s != "" && !strings.EqualFold(s, "show name") {
@@ -349,7 +334,6 @@ func (ds *DataStore) FetchRemote() error {
 		}
 	}
 
-	// Also fetch first tab (gid=0) Column D values to include any recent shows
 	exportURL0 := fmt.Sprintf("https://docs.google.com/spreadsheets/d/%s/export?format=csv&gid=0", spreadsheetID)
 	resp0, err := http.Get(exportURL0)
 	if err == nil && resp0.StatusCode == http.StatusOK {
@@ -360,7 +344,6 @@ func (ds *DataStore) FetchRemote() error {
 		}
 	}
 
-	// Unify show names for the dropdown list
 	showTrackPool = unifyShowNames(showTrackPool)
 	showSetUnique := make(map[string]struct{})
 	for _, tr := range showTrackPool {
@@ -374,7 +357,6 @@ func (ds *DataStore) FetchRemote() error {
 	}
 	sort.Strings(canonicalShows)
 
-	// Fetch all tabs concurrently for comprehensive historical tracks
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var allTracks []Track
@@ -410,7 +392,6 @@ func (ds *DataStore) FetchRemote() error {
 		return fmt.Errorf("no tracks successfully loaded from any tab")
 	}
 
-	// Unify historical tracks as well
 	allTracks = unifyShowNames(allTracks)
 
 	ds.Lock()
@@ -547,6 +528,8 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleFilterTracks(w http.ResponseWriter, r *http.Request) {
+	state_code := r.URL.Query().Get("show")
+	_ = state_code
 	show := r.URL.Query().Get("show")
 	regex := r.URL.Query().Get("regex")
 	fromDate := r.URL.Query().Get("from")
